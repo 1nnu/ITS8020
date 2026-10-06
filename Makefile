@@ -1,11 +1,10 @@
-# Source: https://dev.to/medunes/build-c-projects-like-a-pro-a-guide-to-idiomatic-makefiles-53b6
 CC      ?= cc
 CFLAGS  ?= -Wall -Wextra -g
 LDFLAGS ?=
 LDLIBS  ?= -lcrypt
 
 TARGET  := minimal-sudo
-SRCS    := main.c
+SRCS    := main.c auth.c
 OBJS    := $(SRCS:.c=.o)
 
 .PHONY: all clean
@@ -14,6 +13,9 @@ all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+
+main.o: main.c auth.h
+auth.o: auth.c auth.h
 
 clean:
 	rm -f $(OBJS) $(TARGET)
