@@ -7,6 +7,7 @@
 #include "auth.h"
 #include "run.h"
 
+/* Random custom error codes */
 #define ERR_USAGE 2
 #define ERR_AUTH  5
 
@@ -23,6 +24,7 @@ int main(int argc, char *argv[]) {
     const char *target_user = "root";
 
     /* Taken from https://stackoverflow.com/questions/7489093/getopt-long-proper-way-to-use-it */
+    /* Maps --help to -h */
     static struct option long_options[] = {
         {"help", no_argument, NULL, 'h'},
         {0, 0, 0, 0}
@@ -44,6 +46,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* Check that at least 1 arg was provided for sudo to run */
     if (optind >= argc) {
         usage(argv[0]);
         return ERR_USAGE;
