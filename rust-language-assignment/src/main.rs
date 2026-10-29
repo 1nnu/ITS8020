@@ -1,8 +1,23 @@
-use std::io::Stdin;
+use std::io::{self, Write};
 
 fn main()  {
     let mut buffer: String = String::new();
-    let stdin: Stdin = std::io::stdin();
-    stdin.read_line(&mut buffer).expect("failed to read line");
-    println!("{}", buffer.trim_end());
+    loop {
+        print!("> ");
+        io::stdout().flush().unwrap();
+
+        let bytes = io::stdin().read_line(&mut buffer).expect("Failed to read line");
+
+        if bytes == 0 {
+            println!();
+            break;
+        }
+
+        let input = buffer.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        println!("input: {input}")
+    }
 }
