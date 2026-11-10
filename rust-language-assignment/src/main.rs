@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::{env, fs};
 
 fn main()  {
@@ -30,10 +31,21 @@ fn main()  {
             "exit" => break,
             "cd" => cd(&mut cwd, &args),
             "ls" => ls(&cwd, &args),
-            _ => println!("{cmd}: command not found"),
+            _ => run_external(&cwd, cmd, &args),
         }
 
         println!("input: {input}")
+    }
+}
+
+fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str]) {
+    match Command::new(cmd).args(args).current_dir(cwd).spawn() {
+        Ok(mut child) => {
+            if let Err(e) = child.wait() {
+                println!("{cmd}: {e}");
+            }
+        }
+        Err(e) => println!("{cmd}: {e}"),
     }
 }
 
