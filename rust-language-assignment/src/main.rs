@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::{env, fs};
 
+mod expand;
+use expand::expand;
+
 fn main()  {
     let mut buffer: String = String::new();
     let mut cwd: PathBuf = env::current_dir().unwrap();
@@ -27,6 +30,9 @@ fn main()  {
         let cmd = parts.next().unwrap();
         let args: Vec<&str> = parts.collect();
 
+        let expanded = expand(&cwd, &args);
+        let args: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
+
         match cmd {
             "exit" => break,
             "cd" => cd(&mut cwd, &args),
@@ -34,7 +40,6 @@ fn main()  {
             _ => run_external(&cwd, cmd, &args),
         }
 
-        println!("input: {input}")
     }
 }
 
@@ -63,17 +68,25 @@ fn cd(cwd: &mut PathBuf, args: &[&str]) {
 }
 
 fn ls(cwd: &PathBuf, args: &[&str]) {
-    if args.len() > 1 {
-        println!("ls: expected at most one argument");
+    if args.is_empty() {
+        list_dir(cwd);
         return;
     }
-    let path = if args.is_empty() {
-        cwd.clone()
-    } else {
-        cwd.join(args[0])
-    };
+    for arg in args {
+        let path = cwd.join(arg);
+        if path.is_file() {
+            println!("{arg}");
+        } else {
+            if args.len() > 1 {
+                println!("{arg}:");
+            }
+            list_dir(&path);
+        }
+    }
+}
 
-    match fs::read_dir(&path) {
+fn list_dir(path: &PathBuf) {
+    match fs::read_dir(path) {
         Ok(entries) => {
             for entry in entries {
                 println!("{}", entry.unwrap().file_name().to_string_lossy());
