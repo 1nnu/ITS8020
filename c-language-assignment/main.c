@@ -46,13 +46,13 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Check that at least 1 arg was provided for sudo to run */
+    /* Check that a command was given after the options */
     if (optind >= argc) {
         usage(argv[0]);
         return ERR_USAGE;
     }
 
-    /* Get password for command runner */
+    /* Look up the passwd entry of the invoking user via real UID */
     struct passwd *invoker = getpwuid(getuid());
 
     /* Authenticate */
@@ -61,11 +61,11 @@ int main(int argc, char *argv[]) {
         return ERR_AUTH;
     }
 
-    /* Get password for target user */
+    /* Look up the target user's passwd entry and switch to their UID */
     struct passwd *target = getpwnam(target_user);
     setuid(target->pw_uid);
 
-    /* Set safe paths */
+    /* Replace PATH with a trusted value */
     setenv("PATH", "/usr/bin:/bin", 1);
 
     /* Run target command */
