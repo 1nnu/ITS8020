@@ -7,8 +7,10 @@ pub fn expand(cwd: &PathBuf, args: &[&str]) -> Vec<String> {
         if *arg == "." {
             result.push(cwd.display().to_string());
         } else if *arg == "~" || arg.starts_with("~/") {
-            let home = env::var("HOME").unwrap_or_default();
-            result.push(arg.replacen('~', &home, 1));
+            match env::var("HOME") {
+                Ok(home) => result.push(arg.replacen('~', &home, 1)),
+                Err(_) => result.push(arg.to_string()), // no HOME: keep `~` literal
+            }
         } else if arg.contains('*') {
             let found = glob(cwd, arg);
             if found.is_empty() {
@@ -27,7 +29,10 @@ fn glob(cwd: &PathBuf, pattern: &str) -> Vec<String> {
     let mut names = Vec::new();
     if let Ok(entries) = fs::read_dir(cwd) {
         for entry in entries {
-            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            let name = match entry {
+                Ok(entry) => entry.file_name().to_string_lossy().to_string(),
+                Err(_) => continue, // skip entries that can't be read
+            };
             // check for hidden files only
             if name.starts_with('.') && !pattern.starts_with('.') {
                 continue;
