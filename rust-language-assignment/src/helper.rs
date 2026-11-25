@@ -8,7 +8,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{Context, Helper};
 
-const BUILTINS: [&str; 3] = ["cd", "exit", "ls"];
+const BUILTINS: [&str; 5] = ["alias", "cd", "exit", "ls", "pwd"];
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const RESET: &str = "\x1b[0m";

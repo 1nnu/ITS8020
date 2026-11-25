@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{self, Command};
 use std::{env, fs};
 
 use rustyline::Editor;
@@ -21,6 +22,7 @@ fn main()  {
             return;
         }
     };
+    let mut aliases: HashMap<String, String> = HashMap::new();
 
     let mut rl: Editor<ShellHelper, DefaultHistory> = match Editor::new() {
         Ok(rl) => rl,
@@ -59,28 +61,60 @@ fn main()  {
             continue;
         }
         let _ = rl.add_history_entry(input);
+        // saved after every line, so `exit` anywhere in a chain keeps the history
+        if let Err(e) = rl.save_history(&history_file) {
+            println!("shell: cannot save history: {e}");
+        }
 
-        let mut parts = input.split_whitespace();
-        let cmd = match parts.next() {
-            Some(cmd) => cmd,
-            None => continue,
-        };
-        let args: Vec<&str> = parts.collect();
-
-        let expanded = expand(&cwd, &args);
-        let args: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
-        let (args, stdout, stderr) = parse_redirects(&args);
-
-        match cmd {
-            "exit" => break,
-            "cd" => cd(&mut cwd, &args),
-            "ls" => ls(&cwd, &args, stdout),
-            _ => run_external(&cwd, cmd, &args, stdout, stderr),
+        // `a ; b` runs both, `a && b` runs b only if a succeeded
+        for group in input.split(';') {
+            for command in group.split("&&") {
+                if !run_command(command, &mut cwd, &mut aliases) {
+                    break;
+                }
+            }
         }
     }
+}
 
-    if let Err(e) = rl.save_history(&history_file) {
-        println!("shell: cannot save history: {e}");
+// runs one command and returns whether it succeeded
+fn run_command(command: &str, cwd: &mut PathBuf, aliases: &mut HashMap<String, String>) -> bool {
+    let line = replace_alias(command, aliases);
+    let mut parts = line.split_whitespace();
+    let cmd = match parts.next() {
+        Some(cmd) => cmd,
+        None => return true, // empty command, e.g. after a trailing `;`
+    };
+    let args: Vec<&str> = parts.collect();
+
+    // alias gets its args before expansion, so `alias x=ls *` keeps the `*`
+    if cmd == "alias" {
+        return alias(aliases, &args);
+    }
+
+    let expanded = expand(cwd, &args);
+    let args: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
+    let (args, stdout, stderr) = parse_redirects(&args);
+
+    match cmd {
+        "exit" => process::exit(0),
+        "cd" => cd(cwd, &args),
+        "ls" => ls(cwd, &args, stdout),
+        "pwd" => pwd(cwd, stdout),
+        _ => run_external(cwd, cmd, &args, stdout, stderr),
+    }
+}
+
+// if the first word is an alias, swap it for its value: `ll src` -> `ls -a src`
+fn replace_alias(command: &str, aliases: &HashMap<String, String>) -> String {
+    let command = command.trim();
+    let (first, rest) = match command.split_once(' ') {
+        Some((first, rest)) => (first, rest),
+        None => (command, ""),
+    };
+    match aliases.get(first) {
+        Some(value) => format!("{value} {rest}"),
+        None => command.to_string(),
     }
 }
 
@@ -109,7 +143,21 @@ fn parse_redirects<'a>(args: &[&'a str]) -> (Vec<&'a str>, Option<&'a str>, Opti
     (rest, stdout, stderr)
 }
 
-fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str], stdout: Option<&str>, stderr: Option<&str>) {
+// the file after `>` if there is one, otherwise the terminal
+fn open_output(cwd: &PathBuf, stdout: Option<&str>) -> Option<Box<dyn Write>> {
+    match stdout {
+        Some(name) => match File::create(cwd.join(name)) {
+            Ok(file) => Some(Box::new(file)),
+            Err(e) => {
+                println!("{name}: {e}");
+                None
+            }
+        },
+        None => Some(Box::new(io::stdout())),
+    }
+}
+
+fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str], stdout: Option<&str>, stderr: Option<&str>) -> bool {
     let mut command = Command::new(cmd);
     command.args(args).current_dir(cwd);
 
@@ -120,7 +168,7 @@ fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str], stdout: Option<&str>, s
             }
             Err(e) => {
                 println!("{name}: {e}");
-                return;
+                return false;
             }
         }
     }
@@ -131,51 +179,91 @@ fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str], stdout: Option<&str>, s
             }
             Err(e) => {
                 println!("{name}: {e}");
-                return;
+                return false;
             }
         }
     }
 
     match command.spawn() {
-        Ok(mut child) => {
-            if let Err(e) = child.wait() {
+        Ok(mut child) => match child.wait() {
+            Ok(status) => status.success(), // exit code 0 means success
+            Err(e) => {
                 println!("{cmd}: {e}");
+                false
             }
+        },
+        Err(e) => {
+            println!("{cmd}: {e}");
+            false
         }
-        Err(e) => println!("{cmd}: {e}"),
     }
 }
 
-fn cd(cwd: &mut PathBuf, args: &[&str]) {
+// `alias` lists the aliases, `alias ll=ls -a` adds one
+fn alias(aliases: &mut HashMap<String, String>, args: &[&str]) -> bool {
+    if args.is_empty() {
+        for (name, value) in aliases.iter() {
+            println!("alias {name}='{value}'");
+        }
+        return true;
+    }
+    let text = args.join(" ");
+    match text.split_once('=') {
+        Some((name, value)) => {
+            // allow `alias ll='ls -a'`: the quotes are not part of the command
+            let value = value.trim_matches('\'').trim_matches('"');
+            aliases.insert(name.to_string(), value.to_string());
+            true
+        }
+        None => {
+            println!("alias: usage: alias name=command");
+            false
+        }
+    }
+}
+
+fn pwd(cwd: &PathBuf, stdout: Option<&str>) -> bool {
+    match open_output(cwd, stdout) {
+        Some(mut out) => {
+            let _ = writeln!(out, "{}", cwd.display());
+            true
+        }
+        None => false,
+    }
+}
+
+fn cd(cwd: &mut PathBuf, args: &[&str]) -> bool {
     if args.len() != 1 {
         println!("cd: expected exactly one argument");
-        return;
+        return false;
     }
     let target = args[0];
     match cwd.join(target).canonicalize() {
-        Ok(path) if path.is_dir() => *cwd = path,
-        Ok(_) => println!("cd: {target}: not a directory"),
-        Err(e) => println!("cd: {target}: {e}"),
+        Ok(path) if path.is_dir() => {
+            *cwd = path;
+            true
+        }
+        Ok(_) => {
+            println!("cd: {target}: not a directory");
+            false
+        }
+        Err(e) => {
+            println!("cd: {target}: {e}");
+            false
+        }
     }
 }
 
-fn ls(cwd: &PathBuf, args: &[&str], stdout: Option<&str>) {
-    // write to the file after `>` if there is one, otherwise to the terminal
-    let mut out: Box<dyn Write> = match stdout {
-        Some(name) => match File::create(cwd.join(name)) {
-            Ok(file) => Box::new(file),
-            Err(e) => {
-                println!("{name}: {e}");
-                return;
-            }
-        },
-        None => Box::new(io::stdout()),
+fn ls(cwd: &PathBuf, args: &[&str], stdout: Option<&str>) -> bool {
+    let mut out = match open_output(cwd, stdout) {
+        Some(out) => out,
+        None => return false,
     };
 
     if args.is_empty() {
-        list_dir(cwd, &mut out);
-        return;
+        return list_dir(cwd, &mut out);
     }
+    let mut ok = true;
     for arg in args {
         let path = cwd.join(arg);
         if path.is_file() {
@@ -184,12 +272,15 @@ fn ls(cwd: &PathBuf, args: &[&str], stdout: Option<&str>) {
             if args.len() > 1 {
                 let _ = writeln!(out, "{arg}:");
             }
-            list_dir(&path, &mut out);
+            if !list_dir(&path, &mut out) {
+                ok = false;
+            }
         }
     }
+    ok
 }
 
-fn list_dir(path: &PathBuf, out: &mut Box<dyn Write>) {
+fn list_dir(path: &PathBuf, out: &mut Box<dyn Write>) -> bool {
     match fs::read_dir(path) {
         Ok(entries) => {
             for entry in entries {
@@ -200,7 +291,11 @@ fn list_dir(path: &PathBuf, out: &mut Box<dyn Write>) {
                     Err(e) => println!("ls: {}: {e}", path.display()),
                 }
             }
+            true
         }
-        Err(e) => println!("ls: {}: {e}", path.display()),
+        Err(e) => {
+            println!("ls: {}: {e}", path.display());
+            false
+        }
     }
 }
