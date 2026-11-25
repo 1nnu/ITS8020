@@ -1,15 +1,17 @@
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::{env, fs};
 
+use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, Editor};
 
-mod completion;
 mod expand;
-use completion::ShellHelper;
+mod helper;
 use expand::expand;
+use helper::ShellHelper;
 
 fn main()  {
     let mut cwd: PathBuf = match env::current_dir() {
@@ -20,28 +22,22 @@ fn main()  {
         }
     };
 
-    // List: first Tab completes the common prefix, second Tab lists the options
-    let config = Config::builder()
-        .completion_type(CompletionType::List)
-        .build();
-    let mut rl: Editor<ShellHelper, DefaultHistory> = match Editor::with_config(config) {
+    let mut rl: Editor<ShellHelper, DefaultHistory> = match Editor::new() {
         Ok(rl) => rl,
         Err(e) => {
             println!("shell: cannot start line editor: {e}");
             return;
         }
     };
-    rl.set_helper(Some(ShellHelper { cwd: cwd.clone() }));
+    rl.set_helper(Some(ShellHelper));
 
     // history is kept in ~/.rust_shell_history between sessions
     let history_file = match env::var("HOME") {
-        Ok(home) => Some(PathBuf::from(home).join(".rust_shell_history")),
-        Err(_) => None,
+        Ok(home) => PathBuf::from(home).join(".rust_shell_history"),
+        Err(_) => PathBuf::from(".rust_shell_history"),
     };
-    if let Some(file) = &history_file {
-        // the file doesn't exist on the first run, so a failed load is fine
-        let _ = rl.load_history(file);
-    }
+    // the file doesn't exist on the first run, so a failed load is fine
+    let _ = rl.load_history(&history_file);
 
     loop {
         let prompt = format!("{}> ", cwd.display());
@@ -73,31 +69,74 @@ fn main()  {
 
         let expanded = expand(&cwd, &args);
         let args: Vec<&str> = expanded.iter().map(|s| s.as_str()).collect();
+        let (args, stdout, stderr) = parse_redirects(&args);
 
         match cmd {
             "exit" => break,
-            "cd" => {
-                cd(&mut cwd, &args);
-                // completion has to know the new directory too
-                if let Some(helper) = rl.helper_mut() {
-                    helper.cwd = cwd.clone();
-                }
-            }
-            "ls" => ls(&cwd, &args),
-            _ => run_external(&cwd, cmd, &args),
+            "cd" => cd(&mut cwd, &args),
+            "ls" => ls(&cwd, &args, stdout),
+            _ => run_external(&cwd, cmd, &args, stdout, stderr),
         }
-
     }
 
-    if let Some(file) = &history_file {
-        if let Err(e) = rl.save_history(file) {
-            println!("shell: cannot save history: {e}");
-        }
+    if let Err(e) = rl.save_history(&history_file) {
+        println!("shell: cannot save history: {e}");
     }
 }
 
-fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str]) {
-    match Command::new(cmd).args(args).current_dir(cwd).spawn() {
+// takes `> file` and `2> file` out of the args and returns the file names
+fn parse_redirects<'a>(args: &[&'a str]) -> (Vec<&'a str>, Option<&'a str>, Option<&'a str>) {
+    let mut rest = Vec::new();
+    let mut stdout = None;
+    let mut stderr = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            ">" => {
+                stdout = args.get(i + 1).copied();
+                i += 2;
+            }
+            "2>" => {
+                stderr = args.get(i + 1).copied();
+                i += 2;
+            }
+            arg => {
+                rest.push(arg);
+                i += 1;
+            }
+        }
+    }
+    (rest, stdout, stderr)
+}
+
+fn run_external(cwd: &PathBuf, cmd: &str, args: &[&str], stdout: Option<&str>, stderr: Option<&str>) {
+    let mut command = Command::new(cmd);
+    command.args(args).current_dir(cwd);
+
+    if let Some(name) = stdout {
+        match File::create(cwd.join(name)) {
+            Ok(file) => {
+                command.stdout(file);
+            }
+            Err(e) => {
+                println!("{name}: {e}");
+                return;
+            }
+        }
+    }
+    if let Some(name) = stderr {
+        match File::create(cwd.join(name)) {
+            Ok(file) => {
+                command.stderr(file);
+            }
+            Err(e) => {
+                println!("{name}: {e}");
+                return;
+            }
+        }
+    }
+
+    match command.spawn() {
         Ok(mut child) => {
             if let Err(e) = child.wait() {
                 println!("{cmd}: {e}");
@@ -120,30 +159,44 @@ fn cd(cwd: &mut PathBuf, args: &[&str]) {
     }
 }
 
-fn ls(cwd: &PathBuf, args: &[&str]) {
+fn ls(cwd: &PathBuf, args: &[&str], stdout: Option<&str>) {
+    // write to the file after `>` if there is one, otherwise to the terminal
+    let mut out: Box<dyn Write> = match stdout {
+        Some(name) => match File::create(cwd.join(name)) {
+            Ok(file) => Box::new(file),
+            Err(e) => {
+                println!("{name}: {e}");
+                return;
+            }
+        },
+        None => Box::new(io::stdout()),
+    };
+
     if args.is_empty() {
-        list_dir(cwd);
+        list_dir(cwd, &mut out);
         return;
     }
     for arg in args {
         let path = cwd.join(arg);
         if path.is_file() {
-            println!("{arg}");
+            let _ = writeln!(out, "{arg}");
         } else {
             if args.len() > 1 {
-                println!("{arg}:");
+                let _ = writeln!(out, "{arg}:");
             }
-            list_dir(&path);
+            list_dir(&path, &mut out);
         }
     }
 }
 
-fn list_dir(path: &PathBuf) {
+fn list_dir(path: &PathBuf, out: &mut Box<dyn Write>) {
     match fs::read_dir(path) {
         Ok(entries) => {
             for entry in entries {
                 match entry {
-                    Ok(entry) => println!("{}", entry.file_name().to_string_lossy()),
+                    Ok(entry) => {
+                        let _ = writeln!(out, "{}", entry.file_name().to_string_lossy());
+                    }
                     Err(e) => println!("ls: {}: {e}", path.display()),
                 }
             }
